@@ -46,8 +46,8 @@ static const struct option_wrapper long_options[] = {
 	{{"force",       no_argument,		NULL, 'F' },
 	 "Force install, replacing existing program on interface"},
 
-	{{"unload",      no_argument,		NULL, 'U' },
-	 "Unload XDP program instead of loading"},
+	{{"unload",      required_argument,	NULL, 'U' },
+	 "Unload XDP program <id> instead of loading", "<id>"},
 
 	{{"quiet",       no_argument,		NULL, 'q' },
 	 "Quiet mode (no output)"},
