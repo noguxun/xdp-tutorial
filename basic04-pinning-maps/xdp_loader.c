@@ -134,8 +134,16 @@ int main(int argc, char **argv)
 		return EXIT_FAIL_OPTION;
 	}
 	if (cfg.do_unload) {
-		/* TODO: Miss unpin of maps on unload */
-		/* return xdp_link_detach(cfg.ifindex, cfg.xdp_flags, 0); */
+		err = do_unload(&cfg);
+		if (err) {
+			char errmsg[1024];
+			libxdp_strerror(err, errmsg, sizeof(errmsg));
+			fprintf(stderr, "Couldn't unload XDP program: %s\n", errmsg);
+			return err;
+		}
+
+		printf("Success: Unloaded XDP program\n");
+		return EXIT_OK;
 	}
 
 	program = load_bpf_and_xdp_attach(&cfg);
