@@ -157,7 +157,15 @@ to reuse it, instead of creating a new map.
 
 
 
-
 sudo ./xdp_loader --dev lo --progname xdp_pass_func --skb-mode
 sudo bpftool prog show | grep -A2 xdp
 sudo ./xdp_loader --dev lo --unload 152
+
+
+option 1: 
+fixed unlink() the path ... 
+
+option 2:
+like in do_unload(), from program_id --> get xdp program --> get bpf project by xdp_program__bpf_obj() --> call bpf_object__unpin_maps(bpf_obj, pin_dir) 
+does the bpf_obj (gotten from the program id) contains the map? 
+
