@@ -134,6 +134,30 @@ int main(int argc, char **argv)
 		return EXIT_FAIL_OPTION;
 	}
 	if (cfg.do_unload) {
+		/* unpin the maps */
+		char map_filename[PATH_MAX];
+		int len;
+
+		len = snprintf(map_filename, PATH_MAX, "%s/%s/%s", pin_basedir, cfg.ifname, map_name);
+		if (len < 0) {
+			fprintf(stderr, "ERR: creating map filename for unload\n");
+			return EXIT_FAIL_OPTION;
+		}
+
+		/* Check if the map file exists and unpin it */
+		if (access(map_filename, F_OK) == 0) {
+			if (verbose)
+				printf(" - Unpinning map %s\n", map_filename);
+			
+			/* Use unlink to remove the pinned map file */
+			err = unlink(map_filename);
+			if (err) {
+				fprintf(stderr, "ERR: Failed to unpin map %s: %s\n", 
+					map_filename, strerror(errno));
+			}
+		}
+
+		/* unload the program */
 		err = do_unload(&cfg);
 		if (err) {
 			char errmsg[1024];

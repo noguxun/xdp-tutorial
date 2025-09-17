@@ -154,3 +154,10 @@ it just requires writing your own =bpf_prog_load()= (or
 The *assignment* is to check in [[file:xdp_loader.c][xdp_loader]] if there already is a pinned
 version of the map "xdp_stats_map" and use libbpf =bpf_map__reuse_fd()= API
 to reuse it, instead of creating a new map.
+
+
+
+
+sudo ./xdp_loader --dev lo --progname xdp_pass_func --skb-mode
+sudo bpftool prog show | grep -A2 xdp
+sudo ./xdp_loader --dev lo --unload 152
