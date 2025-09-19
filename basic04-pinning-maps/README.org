@@ -166,6 +166,27 @@ option 1:
 fixed unlink() the path ... 
 
 option 2:
+// will not work
 like in do_unload(), from program_id --> get xdp program --> get bpf project by xdp_program__bpf_obj() --> call bpf_object__unpin_maps(bpf_obj, pin_dir) 
 does the bpf_obj (gotten from the program id) contains the map? 
 
+
+bpftool prog show
+53: cgroup_sysctl  name sysctl_monitor  tag 78dcac0637f56d1c  gpl
+	loaded_at 2025-09-15T14:53:41+0200  uid 193
+	xlated 1232B  jited 791B  memlock 4096B  map_ids 13,16,14
+	btf_id 232
+	pids systemd-network(1273)
+
+
+bpftool map show
+
+multiple bpf program writing to same map possiblely corrupt data. 
+atomic/locking operation possible, 
+
+kernel only allows xdp program per interface 
+libxdp , create a dispatcher attached to interface 0,  only
+other ebpf programs attached to dispatcher 
+dispatcher have 10 small empty functions, replace each with loaded ebf 
+
+https://github.com/xdp-project/xdp-tools/blob/main/lib/libxdp/protocol.org

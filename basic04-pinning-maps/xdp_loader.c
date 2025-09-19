@@ -170,9 +170,85 @@ int main(int argc, char **argv)
 		return EXIT_OK;
 	}
 
-	program = load_bpf_and_xdp_attach(&cfg);
-	if (!program)
+	/* Try to reuse existing pinned maps before loading */
+	char map_filename[PATH_MAX];
+	int len = snprintf(map_filename, PATH_MAX, "%s/%s/%s", pin_basedir, cfg.ifname, map_name);
+	if (len < 0) {
+		fprintf(stderr, "ERR: creating map filename for reuse\n");
+		return EXIT_FAIL_OPTION;
+	}
+
+	/* Check if pinned map exists for reuse */
+	int pinned_map_fd = -1;
+	if (access(map_filename, F_OK) == 0) {
+		pinned_map_fd = bpf_obj_get(map_filename);
+		if (pinned_map_fd < 0) {
+			fprintf(stderr, "ERR: Failed to get pinned map %s: %s\n", 
+				map_filename, strerror(errno));
+			return EXIT_FAIL_BPF;
+		}
+		if (verbose)
+			printf(" - Reusing pinned map: %s\n", map_filename);
+	}
+
+	/* Load BPF program with map reuse if available */
+	struct bpf_object *obj = bpf_object__open(cfg.filename);
+	if (!obj) {
+		fprintf(stderr, "ERR: Failed to open BPF object %s: %s\n", 
+			cfg.filename, strerror(errno));
+		if (pinned_map_fd >= 0)
+			close(pinned_map_fd);
 		return EXIT_FAIL_BPF;
+	}
+
+	/* Reuse pinned map if it exists */
+	if (pinned_map_fd >= 0) {
+		struct bpf_map *map = bpf_object__find_map_by_name(obj, map_name);
+		if (!map) {
+			fprintf(stderr, "ERR: Failed to find map %s in BPF object\n", map_name);
+			close(pinned_map_fd);
+			bpf_object__close(obj);
+			return EXIT_FAIL_BPF;
+		}
+
+		err = bpf_map__reuse_fd(map, pinned_map_fd);
+		if (err) {
+			fprintf(stderr, "ERR: Failed to reuse map fd: %s\n", strerror(-err));
+			close(pinned_map_fd);
+			bpf_object__close(obj);
+			return EXIT_FAIL_BPF;
+		}
+	}
+
+	/* Load the BPF object */
+	err = bpf_object__load(obj);
+	if (err) {
+		fprintf(stderr, "ERR: Failed to load BPF object: %s\n", strerror(-err));
+		if (pinned_map_fd >= 0)
+			close(pinned_map_fd);
+		bpf_object__close(obj);
+		return EXIT_FAIL_BPF;
+	}
+
+	/* Create XDP program from the loaded object */
+	program = xdp_program__from_bpf_obj(obj, cfg.progname);
+	if (!program) {
+		fprintf(stderr, "ERR: Failed to create XDP program from BPF object\n");
+		if (pinned_map_fd >= 0)
+			close(pinned_map_fd);
+		bpf_object__close(obj);
+		return EXIT_FAIL_BPF;
+	}
+
+	/* Attach the XDP program */
+	err = xdp_program__attach(program, cfg.ifindex, cfg.attach_mode, 0);
+	if (err) {
+		fprintf(stderr, "ERR: Failed to attach XDP program: %s\n", strerror(-err));
+		xdp_program__close(program);
+		if (pinned_map_fd >= 0)
+			close(pinned_map_fd);
+		return EXIT_FAIL_BPF;
+	}
 
 	if (verbose) {
 		printf("Success: Loaded BPF-object(%s) and used program(%s)\n",
@@ -182,7 +258,7 @@ int main(int argc, char **argv)
 	}
 
 	/* Use the --dev name as subdir for exporting/pinning maps */
-	err = pin_maps_in_bpf_object(xdp_program__bpf_obj(program), cfg.ifname);
+	err = pin_maps_in_bpf_object(obj, cfg.ifname);
 	if (err) {
 		fprintf(stderr, "ERR: pinning maps\n");
 		return err;
