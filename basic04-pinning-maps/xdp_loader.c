@@ -22,7 +22,6 @@ static const char *__doc__ = "XDP loader\n"
 #include "../common/common_params.h"
 #include "../common/common_user_bpf_xdp.h"
 #include "../common/common_libbpf.h"
-#include "common_kern_user.h"
 
 static const char *default_filename = "xdp_prog_kern.o";
 
@@ -46,8 +45,8 @@ static const struct option_wrapper long_options[] = {
 	{{"force",       no_argument,		NULL, 'F' },
 	 "Force install, replacing existing program on interface"},
 
-	{{"unload",      no_argument,		NULL, 'U' },
-	 "Unload XDP program instead of loading"},
+	{{"unload",      required_argument,	NULL, 'U' },
+	 "Unload XDP program <id> instead of loading", "<id>"},
 
 	{{"quiet",       no_argument,		NULL, 'q' },
 	 "Quiet mode (no output)"},
@@ -89,7 +88,7 @@ int pin_maps_in_bpf_object(struct bpf_object *bpf_obj, const char *subdir)
 	}
 
 	/* Existing/previous XDP prog might not have cleaned up */
-	if (access(map_filename, F_OK ) != -1 ) {
+	if (access(map_filename, F_OK) != -1 ) {
 		if (verbose)
 			printf(" - Unpinning (remove) prev maps in %s/\n",
 			       pin_dir);
@@ -106,16 +105,19 @@ int pin_maps_in_bpf_object(struct bpf_object *bpf_obj, const char *subdir)
 
 	/* This will pin all maps in our bpf_object */
 	err = bpf_object__pin_maps(bpf_obj, pin_dir);
-	if (err)
+	if (err) {
+		fprintf(stderr, "ERR: Pinning maps in %s\n", pin_dir);
 		return EXIT_FAIL_BPF;
+	}
 
 	return 0;
 }
 
 int main(int argc, char **argv)
 {
+	int err, len;
 	struct xdp_program *program;
-	int err;
+	char path[PATH_MAX];
 
 	struct config cfg = {
 		.attach_mode = XDP_MODE_NATIVE,
@@ -135,26 +137,23 @@ int main(int argc, char **argv)
 	}
 	if (cfg.do_unload) {
 		/* unpin the maps */
-		char map_filename[PATH_MAX];
-		int len;
-
-		len = snprintf(map_filename, PATH_MAX, "%s/%s/%s", pin_basedir,
+		len = snprintf(path, PATH_MAX, "%s/%s/%s", pin_basedir,
 			       cfg.ifname, map_name);
 		if (len < 0) {
 			fprintf(stderr, "ERR: creating map filename for unload\n");
 			return EXIT_FAIL_OPTION;
 		}
 
-		/* Check if the map file exists and unpin it */
-		if (access(map_filename, F_OK) == 0) {
+		/* If the map file exists, unpin it */
+		if (access(path, F_OK) == 0) {
 			if (verbose)
-				printf(" - Unpinning map %s\n", map_filename);
+				printf(" - Unpinning map %s\n", path);
 
 			/* Use unlink to remove the pinned map file */
-			err = unlink(map_filename);
+			err = unlink(path);
 			if (err) {
 				fprintf(stderr, "ERR: Failed to unpin map %s: %s\n",
-					map_filename, strerror(errno));
+					path, strerror(errno));
 			}
 		}
 
@@ -172,8 +171,10 @@ int main(int argc, char **argv)
 	}
 
 	program = load_bpf_and_xdp_attach(&cfg);
-	if (!program)
-		return EXIT_FAIL_BPF;
+	if (!program) {
+		err = EXIT_FAIL_BPF;
+		goto out;
+	}
 
 	if (verbose) {
 		printf("Success: Loaded BPF-object(%s) and used program(%s)\n",
@@ -186,8 +187,12 @@ int main(int argc, char **argv)
 	err = pin_maps_in_bpf_object(xdp_program__bpf_obj(program), cfg.ifname);
 	if (err) {
 		fprintf(stderr, "ERR: pinning maps\n");
-		return err;
+		goto out;
 	}
 
-	return EXIT_OK;
+	err = EXIT_OK;
+
+out:
+	xdp_program__close(program);
+	return err;
 }

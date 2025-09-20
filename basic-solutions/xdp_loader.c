@@ -45,11 +45,8 @@ static const struct option_wrapper long_options[] = {
 	{{"force",       no_argument,		NULL, 'F' },
 	 "Force install, replacing existing program on interface"},
 
-	{{"unload",      no_argument,		NULL, 'U' },
-	 "Unload XDP program instead of loading"},
-
-	{{"reuse-maps",  no_argument,		NULL, 'M' },
-	 "Reuse pinned maps"},
+	{{"unload",      required_argument,	NULL, 'U' },
+	 "Unload XDP program <id> instead of loading", "<id>"},
 
 	{{"quiet",       no_argument,		NULL, 'q' },
 	 "Quiet mode (no output)"},
@@ -70,14 +67,94 @@ static const struct option_wrapper long_options[] = {
 const char *pin_basedir =  "/sys/fs/bpf";
 const char *map_name    =  "xdp_stats_map";
 
+
+/* Load BPF and XDP program with map reuse using libxdp */
+struct xdp_program *load_bpf_and_xdp_attach_reuse_maps(struct config *cfg, const char *pin_dir, bool *map_reused)
+{
+	struct xdp_program *prog = NULL;
+	struct bpf_map *map;
+	char map_path[PATH_MAX];
+	int len, pinned_map_fd;
+	int err;
+
+	if (!cfg || !cfg->filename[0] || !cfg->progname[0] || !pin_dir || !map_reused) {
+		fprintf(stderr, "ERR: invalid arguments\n");
+		return NULL;
+	}
+
+	*map_reused = false;
+
+	/* 1) Create XDP program through libxdp */
+	DECLARE_LIBXDP_OPTS(xdp_program_opts, xdp_opts,
+		.prog_name = cfg->progname,
+		.open_filename = cfg->filename);
+
+	prog = xdp_program__create(&xdp_opts);
+	if (!prog) {
+		err = errno;
+		fprintf(stderr, "ERR: xdp_program__create: %s\n", strerror(err));
+		return NULL;
+	}
+
+	/* 2) Get BPF object from xdp_program and reuse the specific map 
+	 * At this point: BPF object and maps have not been loaded into the kernel
+	 */
+	map = bpf_object__find_map_by_name(xdp_program__bpf_obj(prog), map_name);
+	if (!map) {
+		fprintf(stderr, "ERR: Map %s not found!\n", map_name);
+		goto out;
+	}
+
+	len = snprintf(map_path, PATH_MAX, "%s/%s", pin_dir, map_name);
+	if (len < 0 || len >= PATH_MAX) {
+		fprintf(stderr, "ERR: map path too long\n");
+		goto out;
+	}
+
+	pinned_map_fd = bpf_obj_get(map_path);
+	if (pinned_map_fd >= 0) {
+		err = bpf_map__reuse_fd(map, pinned_map_fd);
+		if (err) {
+			close(pinned_map_fd);
+			fprintf(stderr, "ERR: bpf_map__reuse_fd: %s\n", strerror(-err));
+			goto out;
+		}
+		*map_reused = true;
+		if (verbose)
+			printf(" - Reusing pinned map: %s\n", map_path);
+	}
+
+	/* 3) Attach XDP program to interface 
+	 * BPF object will be loaded into the kernel as part of XDP attachment
+	 */
+	err = xdp_program__attach(prog, cfg->ifindex, cfg->attach_mode, 0);
+	if (err) {
+		fprintf(stderr, "ERR: xdp_program__attach: %s\n", strerror(-err));
+		goto out;
+	}
+
+	return prog;
+
+out:
+	xdp_program__close(prog);
+	return NULL;
+}
+
 /* Pinning maps under /sys/fs/bpf in subdir */
-int pin_maps_in_bpf_object(struct bpf_object *bpf_obj, struct config *cfg)
+int pin_maps_in_bpf_object(struct bpf_object *bpf_obj, const char *subdir)
 {
 	char map_filename[PATH_MAX];
+	char pin_dir[PATH_MAX];
 	int err, len;
 
+	len = snprintf(pin_dir, PATH_MAX, "%s/%s", pin_basedir, subdir);
+	if (len < 0) {
+		fprintf(stderr, "ERR: creating pin dirname\n");
+		return EXIT_FAIL_OPTION;
+	}
+
 	len = snprintf(map_filename, PATH_MAX, "%s/%s/%s",
-		       cfg->pin_dir, cfg->ifname, map_name);
+		       pin_basedir, subdir, map_name);
 	if (len < 0) {
 		fprintf(stderr, "ERR: creating map_name\n");
 		return EXIT_FAIL_OPTION;
@@ -87,22 +164,22 @@ int pin_maps_in_bpf_object(struct bpf_object *bpf_obj, struct config *cfg)
 	if (access(map_filename, F_OK) != -1 ) {
 		if (verbose)
 			printf(" - Unpinning (remove) prev maps in %s/\n",
-			       cfg->pin_dir);
+			       pin_dir);
 
 		/* Basically calls unlink(3) on map_filename */
-		err = bpf_object__unpin_maps(bpf_obj, cfg->pin_dir);
+		err = bpf_object__unpin_maps(bpf_obj, pin_dir);
 		if (err) {
-			fprintf(stderr, "ERR: UNpinning maps in %s\n", cfg->pin_dir);
+			fprintf(stderr, "ERR: UNpinning maps in %s\n", pin_dir);
 			return EXIT_FAIL_BPF;
 		}
 	}
 	if (verbose)
-		printf(" - Pinning maps in %s/\n", cfg->pin_dir);
+		printf(" - Pinning maps in %s/\n", pin_dir);
 
 	/* This will pin all maps in our bpf_object */
-	err = bpf_object__pin_maps(bpf_obj, cfg->pin_dir);
+	err = bpf_object__pin_maps(bpf_obj, pin_dir);
 	if (err) {
-		fprintf(stderr, "ERR: Pinning maps in %s\n", cfg->pin_dir);
+		fprintf(stderr, "ERR: Pinning maps in %s\n", pin_dir);
 		return EXIT_FAIL_BPF;
 	}
 
@@ -111,8 +188,10 @@ int pin_maps_in_bpf_object(struct bpf_object *bpf_obj, struct config *cfg)
 
 int main(int argc, char **argv)
 {
-	struct xdp_program *program;
 	int err, len;
+	struct xdp_program *program;
+	bool map_reused = false;
+	char path[PATH_MAX];
 
 	struct config cfg = {
 		.attach_mode = XDP_MODE_NATIVE,
@@ -131,23 +210,52 @@ int main(int argc, char **argv)
 		return EXIT_FAIL_OPTION;
 	}
 	if (cfg.do_unload) {
-		if (!cfg.reuse_maps) {
-		/* TODO: Miss unpin of maps on unload */
+		/* unpin the maps */
+		len = snprintf(path, PATH_MAX, "%s/%s/%s", pin_basedir,
+			       cfg.ifname, map_name);
+		if (len < 0) {
+			fprintf(stderr, "ERR: creating map filename for unload\n");
+			return EXIT_FAIL_OPTION;
 		}
-		/* return xdp_link_detach(cfg.ifindex, cfg.xdp_flags, 0); */
+
+		/* If the map file exists, unpin it */
+		if (access(path, F_OK) == 0) {
+			if (verbose)
+				printf(" - Unpinning map %s\n", path);
+
+			/* Use unlink to remove the pinned map file */
+			err = unlink(path);
+			if (err) {
+				fprintf(stderr, "ERR: Failed to unpin map %s: %s\n",
+					path, strerror(errno));
+			}
+		}
+
+		/* unload the program */
+		err = do_unload(&cfg);
+		if (err) {
+			char errmsg[1024];
+			libxdp_strerror(err, errmsg, sizeof(errmsg));
+			fprintf(stderr, "Couldn't unload XDP program: %s\n", errmsg);
+			return err;
+		}
+
+		printf("Success: Unloaded XDP program\n");
+		return EXIT_OK;
 	}
 
-	/* Initialize the pin_dir configuration */
-	len = snprintf(cfg.pin_dir, 512, "%s/%s", pin_basedir, cfg.ifname);
+	/* Try to reuse existing pinned maps before loading */
+	len = snprintf(path, PATH_MAX, "%s/%s", pin_basedir, cfg.ifname);
 	if (len < 0) {
 		fprintf(stderr, "ERR: creating pin dirname\n");
 		return EXIT_FAIL_OPTION;
 	}
 
-
-	program = load_bpf_and_xdp_attach(&cfg);
-	if (!program)
-		return EXIT_FAIL_BPF;
+	program = load_bpf_and_xdp_attach_reuse_maps(&cfg, path, &map_reused);
+	if (!program) {
+		err = EXIT_FAIL_BPF;
+		goto out;
+	}
 
 	if (verbose) {
 		printf("Success: Loaded BPF-object(%s) and used program(%s)\n",
@@ -156,14 +264,18 @@ int main(int argc, char **argv)
 		       cfg.ifname, cfg.ifindex);
 	}
 
-	/* Use the --dev name as subdir for exporting/pinning maps */
-	if (!cfg.reuse_maps) {
-		err = pin_maps_in_bpf_object(xdp_program__bpf_obj(program), &cfg);
+	if (!map_reused) {
+		/* Use the --dev name as subdir for exporting/pinning maps */
+		err = pin_maps_in_bpf_object(xdp_program__bpf_obj(program), cfg.ifname);
 		if (err) {
 			fprintf(stderr, "ERR: pinning maps\n");
-			return err;
+			goto out;
 		}
 	}
 
-	return EXIT_OK;
+	err = EXIT_OK;
+
+out:
+	xdp_program__close(program);
+	return err;
 }
