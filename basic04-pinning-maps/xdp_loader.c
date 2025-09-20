@@ -69,29 +69,27 @@ const char *pin_basedir =  "/sys/fs/bpf";
 const char *map_name    =  "xdp_stats_map";
 
 
-/* Load BPF and XDP program with map reuse - returns program FD */
-int load_bpf_and_xdp_attach_reuse_maps(struct config *cfg, const char *pin_dir, struct bpf_object **obj_out, bool *map_reused)
+/* Load BPF and XDP program with map reuse using libxdp */
+struct xdp_program *load_bpf_and_xdp_attach_reuse_maps(struct config *cfg, const char *pin_dir, bool *map_reused)
 {
 	int err = 0;
-	struct bpf_object *obj = NULL;
-	struct bpf_program *prog = NULL;
-	int prog_fd = -1;
 
 	if (!cfg || !cfg->filename[0] || !cfg->progname[0] || !pin_dir || !map_reused) {
 		fprintf(stderr, "ERR: invalid arguments\n");
-		return -1;
+		return NULL;
 	}
 
 	*map_reused = false;
 
-	/* 1) Open the object, but do NOT load yet */
+	/* 1) First, try to reuse maps by opening object and reusing before libxdp creates it */
+	struct bpf_object *obj = NULL;
 	DECLARE_LIBBPF_OPTS(bpf_object_open_opts, open_opts);
 	obj = bpf_object__open_file(cfg->filename, &open_opts);
 	if (libbpf_get_error(obj)) {
 		err = -libbpf_get_error(obj);
 		fprintf(stderr, "ERR: bpf_object__open_file(%s): %s\n",
 			cfg->filename, strerror(-err));
-		return -1;
+		return NULL;
 	}
 
 	/* 2) Try to reuse the specific map */
@@ -101,8 +99,8 @@ int load_bpf_and_xdp_attach_reuse_maps(struct config *cfg, const char *pin_dir, 
 		int len = snprintf(map_path, PATH_MAX, "%s/%s", pin_dir, map_name);
 		if (len < 0 || len >= PATH_MAX) {
 			fprintf(stderr, "ERR: map path too long\n");
-			err = -ENAMETOOLONG;
-			goto cleanup;
+			bpf_object__close(obj);
+			return NULL;
 		}
 
 		int pinned_map_fd = bpf_obj_get(map_path);
@@ -111,7 +109,8 @@ int load_bpf_and_xdp_attach_reuse_maps(struct config *cfg, const char *pin_dir, 
 			if (err) {
 				close(pinned_map_fd);
 				fprintf(stderr, "ERR: bpf_map__reuse_fd: %s\n", strerror(-err));
-				goto cleanup;
+				bpf_object__close(obj);
+				return NULL;
 			}
 			*map_reused = true;
 			if (verbose)
@@ -119,44 +118,30 @@ int load_bpf_and_xdp_attach_reuse_maps(struct config *cfg, const char *pin_dir, 
 		}
 	}
 
-	/* 3) Load the object now that maps have been injected */
-	err = bpf_object__load(obj);
+	/* 3) Now use libxdp with the pre-opened object */
+	DECLARE_LIBXDP_OPTS(xdp_program_opts, xdp_opts, 0);
+	xdp_opts.obj = obj;  /* Use our object with reused maps */
+	xdp_opts.prog_name = cfg->progname;
+
+	struct xdp_program *prog = xdp_program__create(&xdp_opts);
+	err = libxdp_get_error(prog);
 	if (err) {
-		fprintf(stderr, "ERR: bpf_object__load: %s\n", strerror(-err));
-		goto cleanup;
-	}
-
-	/* 4) Find the program by name */
-	prog = bpf_object__find_program_by_name(obj, cfg->progname);
-	if (!prog) {
-		fprintf(stderr, "ERR: cannot find program '%s'\n", cfg->progname);
-		err = -ENOENT;
-		goto cleanup;
-	}
-
-	prog_fd = bpf_program__fd(prog);
-	if (prog_fd < 0) {
-		fprintf(stderr, "ERR: bpf_program__fd: %s\n", strerror(errno));
-		err = -1;
-		goto cleanup;
-	}
-
-	/* 5) Attach to XDP */
-	err = bpf_xdp_attach(cfg->ifindex, prog_fd, cfg->attach_mode, NULL);
-	if (err) {
-		fprintf(stderr, "ERR: bpf_xdp_attach(ifindex=%d): %s\n",
-			cfg->ifindex, strerror(-err));
-		goto cleanup;
-	}
-
-	/* Success - pass object back to caller for map pinning */
-	*obj_out = obj;
-	return prog_fd;
-
-cleanup:
-	if (obj && !libbpf_get_error(obj))
+		char errmsg[1024];
+		libxdp_strerror(err, errmsg, sizeof(errmsg));
+		fprintf(stderr, "ERR: loading program: %s\n", errmsg);
 		bpf_object__close(obj);
-	return -1;
+		return NULL;
+	}
+
+	/* 4) Attach using libxdp (creates dispatcher) */
+	err = xdp_program__attach(prog, cfg->ifindex, cfg->attach_mode, 0);
+	if (err) {
+		fprintf(stderr, "ERR: xdp_program__attach: %s\n", strerror(-err));
+		xdp_program__close(prog);
+		return NULL;
+	}
+
+	return prog;
 }
 
 /* Pinning maps under /sys/fs/bpf in subdir */
@@ -276,12 +261,14 @@ int main(int argc, char **argv)
 		return EXIT_FAIL_OPTION;
 	}
 
-	struct bpf_object *obj = NULL;
 	bool map_reused = false;
-	int prog_fd = load_bpf_and_xdp_attach_reuse_maps(&cfg, pin_dir, &obj, &map_reused);
-	if (prog_fd < 0) {
+	struct xdp_program *program = load_bpf_and_xdp_attach_reuse_maps(&cfg, pin_dir, &map_reused);
+	if (!program) {
 		return EXIT_FAIL_BPF;
 	}
+
+	/* Get the BPF object for map pinning */
+	struct bpf_object *obj = xdp_program__bpf_obj(program);
 
 	if (verbose) {
 		printf("Success: Loaded BPF-object(%s) and used program(%s)\n",

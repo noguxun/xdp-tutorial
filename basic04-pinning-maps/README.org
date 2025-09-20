@@ -190,3 +190,9 @@ other ebpf programs attached to dispatcher
 dispatcher have 10 small empty functions, replace each with loaded ebf 
 
 https://github.com/xdp-project/xdp-tools/blob/main/lib/libxdp/protocol.org
+
+I do not see the dispatcher 
+xugu@fedora:~/git/xdp-tutorial/basic04-pinning-maps$ sudo bpftool prog show | grep -A2 xdp
+585: xdp  name xdp_pass_func  tag c93ccc103be7a91f  gpl
+	loaded_at 2025-09-19T22:10:32+0900  uid 0
+	xlated 232B  jited 150B  memlock 4096B  map_ids 163
