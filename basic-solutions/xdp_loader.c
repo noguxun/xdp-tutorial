@@ -97,7 +97,9 @@ struct xdp_program *load_bpf_and_xdp_attach_reuse_maps(struct config *cfg, const
 		return NULL;
 	}
 
-	/* 2) Access BPF object through xdp_program and reuse the specific map */
+	/* 2) Get BPF object from xdp_program and reuse the specific map 
+	 * At this point: BPF object and maps have not been loaded into the kernel
+	 */
 	map = bpf_object__find_map_by_name(xdp_program__bpf_obj(prog), map_name);
 	if (!map) {
 		fprintf(stderr, "ERR: Map %s not found!\n", map_name);
@@ -123,7 +125,9 @@ struct xdp_program *load_bpf_and_xdp_attach_reuse_maps(struct config *cfg, const
 			printf(" - Reusing pinned map: %s\n", map_path);
 	}
 
-	/* 3) Attach XDP program to interface */
+	/* 3) Attach XDP program to interface 
+	 * BPF object will be loaded into the kernel after XDP attach is done
+	 */
 	err = xdp_program__attach(prog, cfg->ifindex, cfg->attach_mode, 0);
 	if (err) {
 		fprintf(stderr, "ERR: xdp_program__attach: %s\n", strerror(-err));
