@@ -108,6 +108,9 @@ struct xdp_program *load_bpf_and_xdp_attach(struct config *cfg)
 		exit(EXIT_FAIL_BPF);
 	}
 
+	// TODO: what comments should I put here 
+	// Toke: Yeah, looks like that comment is left-over from before the conversion to libxdp. At that point it was accurate, today it's wrong (i.e., libxdp doesn't load the bpf_object into the kernel until xdp_program__attach() is called)
+	
 	/* At this point: All XDP/BPF programs from the cfg->filename have been
 	 * loaded into the kernel, and evaluated by the verifier. Only one of
 	 * these gets attached to XDP hook, the others will get freed once this

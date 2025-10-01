@@ -172,8 +172,10 @@ int main(int argc, char **argv)
 	}
 
 	program = load_bpf_and_xdp_attach(&cfg);
-	if (!program)
-		return EXIT_FAIL_BPF;
+	if (!program) {
+		err = EXIT_FAIL_BPF;
+		goto out;
+	}
 
 	if (verbose) {
 		printf("Success: Loaded BPF-object(%s) and used program(%s)\n",
@@ -186,10 +188,12 @@ int main(int argc, char **argv)
 	err = pin_maps_in_bpf_object(xdp_program__bpf_obj(program), cfg.ifname);
 	if (err) {
 		fprintf(stderr, "ERR: pinning maps\n");
-		return err;
+		goto out;
 	}
 
-	xdp_program__close(program);
+	err = EXIT_OK;
 
-	return EXIT_OK;
+out:
+	xdp_program__close(program);
+	return err;
 }
