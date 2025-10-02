@@ -126,7 +126,7 @@ struct xdp_program *load_bpf_and_xdp_attach_reuse_maps(struct config *cfg, const
 	}
 
 	/* 3) Attach XDP program to interface 
-	 * BPF object will be loaded into the kernel after XDP attach is done
+	 * BPF object will be loaded into the kernel as part of XDP attachment
 	 */
 	err = xdp_program__attach(prog, cfg->ifindex, cfg->attach_mode, 0);
 	if (err) {

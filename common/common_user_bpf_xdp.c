@@ -99,6 +99,7 @@ struct xdp_program *load_bpf_and_xdp_attach(struct config *cfg)
 	/* if (cfg->xdp_flags & XDP_FLAGS_HW_MODE) */
 	/* 	offload_ifindex = cfg->ifindex; */
 
+	/* BPF program from cfg->filename will be opened and loaded in user space */
 	struct xdp_program *prog = xdp_program__create(&xdp_opts);
 	err = libxdp_get_error(prog);
 	if (err) {
@@ -107,20 +108,8 @@ struct xdp_program *load_bpf_and_xdp_attach(struct config *cfg)
 		fprintf(stderr, "ERR: loading program: %s\n", errmsg);
 		exit(EXIT_FAIL_BPF);
 	}
-
-	// TODO: what comments should I put here 
-	// Toke: Yeah, looks like that comment is left-over from before the conversion to libxdp. At that point it was accurate, today it's wrong (i.e., libxdp doesn't load the bpf_object into the kernel until xdp_program__attach() is called)
 	
-	/* At this point: All XDP/BPF programs from the cfg->filename have been
-	 * loaded into the kernel, and evaluated by the verifier. Only one of
-	 * these gets attached to XDP hook, the others will get freed once this
-	 * process exit.
-	 */
-
-	/* At this point: BPF-progs are (only) loaded by the kernel, and prog_fd
-	 * is our select file-descriptor handle. Next step is attaching this FD
-	 * to a kernel hook point, in this case XDP net_device link-level hook.
-	 */
+	/* BPF program will be loaded into the kernel and attached to network interface */
 	err = xdp_program__attach(prog, cfg->ifindex, cfg->attach_mode, 0);
 	if (err)
 		exit(err);
