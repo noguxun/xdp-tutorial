@@ -67,21 +67,13 @@ static const struct option_wrapper long_options[] = {
 const char *pin_basedir =  "/sys/fs/bpf";
 const char *map_name    =  "xdp_stats_map";
 
-/* Pinning maps under /sys/fs/bpf in subdir */
-int pin_maps_in_bpf_object(struct bpf_object *bpf_obj, const char *subdir)
+/* Pinning maps under /sys/fs/bpf */
+int pin_maps_in_bpf_object(struct bpf_object *bpf_obj, struct config *cfg)
 {
 	char map_filename[PATH_MAX];
-	char pin_dir[PATH_MAX];
 	int err, len;
 
-	len = snprintf(pin_dir, PATH_MAX, "%s/%s", pin_basedir, subdir);
-	if (len < 0) {
-		fprintf(stderr, "ERR: creating pin dirname\n");
-		return EXIT_FAIL_OPTION;
-	}
-
-	len = snprintf(map_filename, PATH_MAX, "%s/%s/%s",
-		       pin_basedir, subdir, map_name);
+	len = snprintf(map_filename, PATH_MAX, "%s/%s", cfg->pin_dir, map_name);
 	if (len < 0) {
 		fprintf(stderr, "ERR: creating map_name\n");
 		return EXIT_FAIL_OPTION;
@@ -91,33 +83,57 @@ int pin_maps_in_bpf_object(struct bpf_object *bpf_obj, const char *subdir)
 	if (access(map_filename, F_OK) != -1 ) {
 		if (verbose)
 			printf(" - Unpinning (remove) prev maps in %s/\n",
-			       pin_dir);
+			       cfg->pin_dir);
 
 		/* Basically calls unlink(3) on map_filename */
-		err = bpf_object__unpin_maps(bpf_obj, pin_dir);
+		err = bpf_object__unpin_maps(bpf_obj, cfg->pin_dir);
 		if (err) {
-			fprintf(stderr, "ERR: UNpinning maps in %s\n", pin_dir);
+			fprintf(stderr, "ERR: UNpinning maps in %s\n", cfg->pin_dir);
 			return EXIT_FAIL_BPF;
 		}
 	}
 	if (verbose)
-		printf(" - Pinning maps in %s/\n", pin_dir);
+		printf(" - Pinning maps in %s/\n", cfg->pin_dir);
 
 	/* This will pin all maps in our bpf_object */
-	err = bpf_object__pin_maps(bpf_obj, pin_dir);
+	err = bpf_object__pin_maps(bpf_obj, cfg->pin_dir);
 	if (err) {
-		fprintf(stderr, "ERR: Pinning maps in %s\n", pin_dir);
+		fprintf(stderr, "ERR: Pinning maps in %s\n", cfg->pin_dir);
 		return EXIT_FAIL_BPF;
 	}
 
 	return 0;
 }
 
+/* Unpinning map under /sys/fs/bpf */
+void unpin_map(struct config *cfg)
+{
+	char map_path[PATH_MAX];
+	int len;
+
+	len = snprintf(map_path, PATH_MAX, "%s/%s", cfg->pin_dir, map_name);
+	if (len < 0) {
+		fprintf(stderr, "ERR: creating map filename for unpin\n");
+		return;
+	}
+
+	/* If the map file exists, unpin it */
+	if (access(map_path, F_OK) == 0) {
+		if (verbose)
+			printf(" - Unpinning map %s\n", map_path);
+
+		/* Use unlink to remove the pinned map file */
+		if (unlink(map_path)) {
+			fprintf(stderr, "ERR: Failed to unpin map %s: %s\n",
+				map_path, strerror(errno));
+		}
+	}
+}
+
 int main(int argc, char **argv)
 {
 	int err, len;
 	struct xdp_program *program;
-	char path[PATH_MAX];
 
 	struct config cfg = {
 		.attach_mode = XDP_MODE_NATIVE,
@@ -135,27 +151,16 @@ int main(int argc, char **argv)
 		usage(argv[0], __doc__, long_options, (argc == 1));
 		return EXIT_FAIL_OPTION;
 	}
+
+	/* set map pinning dir */
+	len = snprintf(cfg.pin_dir, 512, "%s/%s", pin_basedir, cfg.ifname);
+	if (len < 0) {
+		fprintf(stderr, "ERR: creating pin dirname\n");
+		return EXIT_FAIL_OPTION;
+	}
+
 	if (cfg.do_unload) {
-		/* unpin the maps */
-		len = snprintf(path, PATH_MAX, "%s/%s/%s", pin_basedir,
-			       cfg.ifname, map_name);
-		if (len < 0) {
-			fprintf(stderr, "ERR: creating map filename for unload\n");
-			return EXIT_FAIL_OPTION;
-		}
-
-		/* If the map file exists, unpin it */
-		if (access(path, F_OK) == 0) {
-			if (verbose)
-				printf(" - Unpinning map %s\n", path);
-
-			/* Use unlink to remove the pinned map file */
-			err = unlink(path);
-			if (err) {
-				fprintf(stderr, "ERR: Failed to unpin map %s: %s\n",
-					path, strerror(errno));
-			}
-		}
+		unpin_map(&cfg);
 
 		/* unload the program */
 		err = do_unload(&cfg);
@@ -184,7 +189,7 @@ int main(int argc, char **argv)
 	}
 
 	/* Use the --dev name as subdir for exporting/pinning maps */
-	err = pin_maps_in_bpf_object(xdp_program__bpf_obj(program), cfg.ifname);
+	err = pin_maps_in_bpf_object(xdp_program__bpf_obj(program), &cfg);
 	if (err) {
 		fprintf(stderr, "ERR: pinning maps\n");
 		goto out;
